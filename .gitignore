@@ -1,0 +1,5 @@
+.deploy-url
+.env*
+!.env.example
+.DS_Store
+__pycache__/
