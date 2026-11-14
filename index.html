@@ -361,18 +361,48 @@ function startSeg({ id, start }) {
     player.seekTo(start, true);
     player.playVideo();
   }
+  if (adMode) setAdMode(false);
+  lastT = null; adTicks = idleTicks = nudgeTicks = 0;
   clearInterval(ticker);
   ticker = setInterval(tick, 250);
 }
 
+/* YouTube reports "unstarted" or "buffering" while an ad plays, but its clock keeps ticking
+   forward (the ad's clock). A seek is one big jump, not a steady tick, so it isn't mistaken for
+   an ad. Ads stay covered: YouTube's "skip" box shows a thumbnail of the video (team names). */
+let adMode = false, lastT = null, adTicks = 0, idleTicks = 0, nudgeTicks = 0;
+const isEarly = () => current.seg.pb > 60 && player.getCurrentTime() < current.seg.pb - 5;
+function setAdMode(on) {
+  adMode = on;
+  $("time").textContent = on ? "Ad — game starts after" : "";
+  if (on) shield(`<div class="big">Ad playing</div>
+    <div class="small">The game starts right after it. The ad is hidden because YouTube's "skip" box shows a thumbnail of the video, which can reveal the teams.</div>`);
+  else if (player.getPlayerState() === YT.PlayerState.PLAYING) unshield();
+  else shield(`<div class="big">Loading Game ${current.i + 1}…</div>`);
+}
+/* Shown when autoplay is blocked, or when YouTube stalls after ads.
+   If plain "play" doesn't take, jump to the game's start, which usually un-sticks the player. */
+function playPrompt() {
+  shield(`<button class="gold" id="kickBtn">▶ Play Game ${current.i + 1}</button>`);
+  $("kickBtn").onclick = () => {
+    player.playVideo();
+    setTimeout(() => {
+      if (player.getPlayerState() !== YT.PlayerState.PLAYING) { player.seekTo(current.start, true); player.playVideo(); }
+    }, 1500);
+  };
+}
 function onStateChange(e) {
   const S = YT.PlayerState;
-  if (e.data === S.PLAYING) { unshield(); $("playBtn").textContent = "❚❚"; applyCC(); applySpeed(); }
+  // "Playing" far before this game's part of the video means an ad is playing.
+  if (e.data === S.PLAYING && isEarly()) { if (!adMode) setAdMode(true); return; }
+  if (adMode && e.data !== S.UNSTARTED && e.data !== S.BUFFERING) setAdMode(false);
+  if (e.data === S.PLAYING) {
+    unshield(); $("playBtn").textContent = "❚❚"; applyCC(); applySpeed();
+  }
   else if (e.data === S.PAUSED && !current.ended) { pausedShield(); }
   else if (e.data === S.ENDED) { endShield(); }
   else if (e.data === S.CUED || e.data === S.UNSTARTED) {
-    // Autoplay was blocked by the browser — wait for a click.
-    shield(`<button class="gold" onclick="player.playVideo()">▶ Play Game ${current.i + 1}</button>`);
+    playPrompt();
   }
 }
 /* Re-applied on every play/resume: YouTube can quietly reset the speed after loading or seeking. */
@@ -438,6 +468,28 @@ function endShield() {
 function tick() {
   if (!player || !player.getCurrentTime || !current || !current.seg) return;
   const t = player.getCurrentTime();
+  const dt = lastT === null ? 0 : t - lastT;
+  lastT = t;
+  const st = player.getPlayerState();
+  if (adMode && current.seg.pb > 60 && t >= current.seg.pb - 5) { setAdMode(false); adTicks = idleTicks = 0; }
+  if (st === YT.PlayerState.UNSTARTED || st === YT.PlayerState.BUFFERING) {
+    const ticking = dt > 0.1 && dt < 1.5 && !(current.seg.pb > 60 && t >= current.seg.pb - 5);
+    adTicks = ticking ? adTicks + 1 : 0;
+    idleTicks = ticking ? 0 : idleTicks + 1;
+    if (!adMode && adTicks >= 2) setAdMode(true);
+    if (adMode && idleTicks >= 4) { setAdMode(false); playPrompt(); }
+    if (adMode || st === YT.PlayerState.UNSTARTED) return;
+  } else {
+    adTicks = idleTicks = 0;
+    // Some ads report "playing": spot them by a clock far before where this game starts.
+    const early = st === YT.PlayerState.PLAYING && isEarly();
+    if (early !== adMode) setAdMode(early);
+    if (early) {
+      // If it's actually the video having skipped its start time, this puts it back (ads ignore it).
+      if (!(nudgeTicks++ % 20)) player.seekTo(current.start, true);
+      return;
+    }
+  }
   const off = Math.max(0, t - current.start);
   if (t >= current.seg.end - 0.5 && player.getPlayerState() === YT.PlayerState.PLAYING) { endShield(); return; }
   if (off > 120) { const k = gameKey(current.match.id, current.i); if (!watched.has(k)) { watched.add(k); LS.set("watched", [...watched]); } }
